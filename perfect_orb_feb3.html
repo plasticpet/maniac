@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Orb – Soft Impact Pulse + Seamless Scratches</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{width:100%;height:100%;display:block;cursor:grab}
+  canvas:active{cursor:grabbing}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<script>
+(()=>{
+const c=document.getElementById('c');
+const gl=c.getContext('webgl',{alpha:true,antialias:true});
+if(!gl) return;
+gl.getExtension('OES_standard_derivatives');
+
+// ---------- Mat4 (column-major) ----------
+const M4={
+ I(){const m=new Float32Array(16);m[0]=m[5]=m[10]=m[15]=1;return m;},
+ mul(a,b){const o=new Float32Array(16);
+   for(let C=0;C<4;C++)for(let R=0;R<4;R++)
+     o[C*4+R]=a[R]*b[C*4]+a[4+R]*b[C*4+1]+a[8+R]*b[C*4+2]+a[12+R]*b[C*4+3];
+   return o;
+ },
+ persp(f,a,n,fa){const t=1/Math.tan(f/2),nf=1/(n-fa);
+   const m=new Float32Array(16);
+   m[0]=t/a;m[5]=t;m[10]=(fa+n)*nf;m[11]=-1;m[14]=2*fa*n*nf;
+   return m;
+ },
+ t(z){const m=M4.I();m[14]=z;return m;},
+ rx(a){const c=Math.cos(a),s=Math.sin(a),m=M4.I();m[5]=c;m[6]=s;m[9]=-s;m[10]=c;return m;},
+ ry(a){const c=Math.cos(a),s=Math.sin(a),m=M4.I();m[0]=c;m[2]=-s;m[8]=s;m[10]=c;return m;}
+};
+
+// ---------- Shaders ----------
+const VS=`
+attribute vec3 p,n;
+attribute vec2 u;
+uniform mat4 mvp,m;
+varying vec3 N;
+varying vec3 P;
+void main(){
+  N = normalize((m*vec4(n,0.)).xyz);
+  P = p; // object space position for seam-free triplanar detail
+  gl_Position = mvp*vec4(p,1.);
+}`;
+
+const FS=`
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+varying vec3 N;
+varying vec3 P;
+uniform vec3 uLight;
+uniform float uPulse;
+#extension GL_OES_standard_derivatives : enable
+
+float hash(vec2 p){return fract(sin(dot(p,vec2(37.1,91.7)))*43758.5453);}
+float noise(vec2 p){
+  vec2 i=floor(p),f=fract(p);
+  float a=hash(i),b=hash(i+vec2(1,0)),c=hash(i+vec2(0,1)),d=hash(i+1.);
+  vec2 u=f*f*(3.-2.*f);
+  return mix(a,b,u.x)+(c-a)*u.y*(1.-u.x)+(d-b)*u.x*u.y;
+}
+float aastep(float t,float v){float fw=fwidth(v);return smoothstep(t-fw,t+fw,v);}
+
+float hash1(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123);}
+
+// scratch pattern on a 2D plane
+float scratch2D(vec2 uv){
+  // scale + gentle warp
+  vec2 p = uv*vec2(28.,18.);
+  p.x += sin(p.y*0.85)*0.9;
+  float l = abs(fract(p.x + noise(p*0.35)) - 0.5);
+  float s1 = 1.0 - aastep(0.486, l);
+
+  vec2 q = p*1.7;
+  q.x += sin(q.y*1.4)*0.4;
+  float l2 = abs(fract(q.x + noise(q*0.6)) - 0.5);
+  float s2 = 1.0 - aastep(0.493, l2);
+
+  return clamp(s1*0.70 + s2*0.45, 0.0, 1.0);
+}
+
+// seam-free triplanar scratches from object-space position
+float scratchesTri(vec3 pos, vec3 nrm){
+  vec3 w = pow(abs(nrm), vec3(7.0)); // sharp blend to avoid muddy mixing
+  w /= (w.x + w.y + w.z + 1e-6);
+
+  // different offsets to avoid repeating
+  float sx = scratch2D(pos.yz + vec2(0.13, 0.71));
+  float sy = scratch2D(pos.xz + vec2(0.57, 0.29));
+  float sz = scratch2D(pos.xy + vec2(0.91, 0.41));
+
+  return sx*w.x + sy*w.y + sz*w.z;
+}
+
+void main(){
+  vec3 V = vec3(0,0,1);
+
+  // Deep red body, tight yellow light (matches your reference intent)
+  vec3 baseRed    = vec3(1.55, 0.0035, 0.01);
+  vec3 spotYellow = vec3(1.75, 1.60, 0.10);
+
+  vec3 L = normalize(uLight);
+
+  // seam-free micro-emboss
+  float h = scratchesTri(P*1.05, N);
+  vec3 n2 = normalize(N + vec3(h, -h, h)*0.13);
+
+  float ndl = dot(n2, L);
+  // softer terminator (prevents a hard half-dark band)
+  float lam = smoothstep(-0.18, 1.0, ndl);
+
+  float lam2 = lam*lam;
+  vec3 H     = normalize(L + V);
+  float spec = pow(max(dot(n2, H), 0.0), 190.0);
+
+  // red ambient floor + gentle fill keeps the dark side clean and red
+  float amb = 0.46;
+  vec3 L2 = normalize(vec3(-0.35, 0.25, 0.85));
+  float fill = smoothstep(0.0, 1.0, max(dot(n2, L2), 0.0));
+
+  vec3 col = baseRed * (amb + 0.34*lam + 0.20*fill);
+// tight hotspot so yellow doesn't wash over the surface
+  float tight = pow(lam2, 2.0);
+
+  // pulse affects only hotspot region, stays impactful but never "flashbang"
+  float hot = smoothstep(0.25, 0.98, tight + spec*1.05);
+  float p = uPulse * hot; // gate pulse to highlight only
+
+  col += spotYellow * (tight*0.72 + spec*1.32 + p*0.42);
+
+  // micro grain (very subtle)
+  float grain = (noise(P.xy*220.0) - 0.5) * 0.02;
+  float d = (hash1(gl_FragCoord.xy) - 0.5) * 0.010;
+  col *= (1.0 + grain + d);
+
+  // gamma-ish
+  col = pow(col, vec3(1.0/1.6));
+
+  // slight plastic translucency
+  float fres = pow(1.0 - max(dot(n2, V), 0.0), 2.2);
+  float alpha = 0.92 + 0.06*fres;
+
+  gl_FragColor = vec4(col, alpha);
+}`;
+
+// compile/link
+function sh(t,s){const r=gl.createShader(t);gl.shaderSource(r,s);gl.compileShader(r);return r;}
+const Pgm=gl.createProgram();
+gl.attachShader(Pgm, sh(gl.VERTEX_SHADER, VS));
+gl.attachShader(Pgm, sh(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(Pgm);
+gl.useProgram(Pgm);
+
+gl.enable(gl.DEPTH_TEST);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+// mesh
+function sphere(n=240){
+  const P=[],N=[],U=[],I=[];
+  for(let y=0;y<=n;y++)for(let x=0;x<=n;x++){
+    const u=x/n, v=y/n, th=v*Math.PI, ph=u*2*Math.PI;
+    const sx=Math.sin(th)*Math.cos(ph);
+    const sy=Math.cos(th);
+    const sz=Math.sin(th)*Math.sin(ph);
+    P.push(sx,sy,sz);
+    N.push(sx,sy,sz);
+    U.push(u,1-v);
+  }
+  for(let y=0;y<n;y++)for(let x=0;x<n;x++){
+    const i=y*(n+1)+x;
+    I.push(i,i+n+1,i+1, i+n+1,i+n+2,i+1);
+  }
+  return {P:new Float32Array(P),N:new Float32Array(N),U:new Float32Array(U),I:new Uint16Array(I)};
+}
+const mesh=sphere();
+
+function buf(name,data,size){
+  const loc=gl.getAttribLocation(Pgm,name);
+  const b=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,b);
+  gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc,size,gl.FLOAT,false,0,0);
+}
+buf('p',mesh.P,3);
+buf('n',mesh.N,3);
+buf('u',mesh.U,2);
+
+const ib=gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,mesh.I,gl.STATIC_DRAW);
+
+// uniforms
+const uLightLoc = gl.getUniformLocation(Pgm,'uLight');
+const uPulseLoc = gl.getUniformLocation(Pgm,'uPulse');
+const uM  = gl.getUniformLocation(Pgm,'m');
+const uMVP= gl.getUniformLocation(Pgm,'mvp');
+
+// ----- interaction -----
+let rx=0.2, ry=0.6, vrx=0, vry=0, dist=2.75;
+let md=false, lx=0, ly=0;
+
+// time-based pulse envelope: impactful but soft fade
+let pulseT = 999.0; // "off"
+let pulseAmp = 0.0;
+
+// cursor light
+let lightTarget=[0.55,0.95,1.15];
+let lightNow=[0.55,0.95,1.15];
+
+function triggerPulse(){
+  pulseT = 0.0;
+  pulseAmp = Math.min(1.0, pulseAmp + 0.85); // stack a little, capped
+  // tiny spin impulse
+  vry += (Math.random()*0.002 + 0.0015) * (Math.random()<0.5?-1:1);
+  vrx += (Math.random()*0.0015 + 0.0008) * (Math.random()<0.5?-1:1);
+}
+
+c.addEventListener('mousedown', e=>{md=true;lx=e.clientX;ly=e.clientY;});
+window.addEventListener('mouseup', ()=>{md=false;});
+window.addEventListener('mousemove', e=>{
+  const nx=(e.clientX/innerWidth)*2-1;
+  const ny=(e.clientY/innerHeight)*2-1;
+  lightTarget=[0.55+nx*0.35, 0.95+(-ny)*0.35, 1.15];
+
+  if(!md) return;
+  const dx=e.clientX-lx, dy=e.clientY-ly;
+  lx=e.clientX; ly=e.clientY;
+  ry += dx*0.005;
+  rx += dy*0.005;
+  vry = dx*0.0012;
+  vrx = dy*0.0012;
+});
+
+c.addEventListener('click', ()=>{ triggerPulse(); });
+
+c.addEventListener('wheel', e=>{
+  e.preventDefault();
+  dist *= (e.deltaY>0)?1.10:0.90;
+  dist = Math.max(1.55, Math.min(8.0, dist));
+},{passive:false});
+
+function resize(){
+  const r=Math.min(devicePixelRatio||1,2);
+  c.width=innerWidth*r; c.height=innerHeight*r;
+  gl.viewport(0,0,c.width,c.height);
+}
+addEventListener('resize', resize); resize();
+
+function norm3(v){
+  const l=Math.hypot(v[0],v[1],v[2])||1;
+  return [v[0]/l,v[1]/l,v[2]/l];
+}
+
+let lastT=performance.now();
+function draw(t){
+  const dt=Math.min(0.033,(t-lastT)/1000); lastT=t;
+  const dt60=dt*60.0;
+
+  if(!md){
+    ry += vry * dt60;
+    rx += vrx * dt60;
+    const damp = Math.pow(0.94, dt60);
+    vry *= damp;
+    vrx *= damp;
+    if(Math.abs(vry)+Math.abs(vrx) < 0.00012){
+      vry += 0.00018;
+      vrx += 0.00006;
+    }
+  }
+
+  // smooth spotlight follow
+  const follow = 1.0 - Math.pow(0.12, dt60);
+  lightNow[0] += (lightTarget[0]-lightNow[0])*follow;
+  lightNow[1] += (lightTarget[1]-lightNow[1])*follow;
+  lightNow[2] += (lightTarget[2]-lightNow[2])*follow;
+  const L = norm3(lightNow);
+  gl.uniform3f(uLightLoc, L[0], L[1], L[2]);
+
+  // pulse envelope: attack + decay (soft but noticeable)
+  // pulse(t) = amp * (1-exp(-t/a)) * exp(-t/d)
+  const attack=0.06, decay=0.45;
+  pulseT += dt;
+  const env = (1.0 - Math.exp(-pulseT/attack)) * Math.exp(-pulseT/decay);
+  const pulse = Math.min(1.0, env * pulseAmp);
+  gl.uniform1f(uPulseLoc, pulse);
+
+  // let the amp relax slowly so repeated clicks don't stay boosted
+  pulseAmp *= Math.pow(0.92, dt60);
+
+  gl.clearColor(0,0,0,0);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+
+  const Pm=M4.persp(Math.PI/4, c.width/c.height, 0.1, 100.0);
+  const M = M4.mul(M4.ry(ry), M4.rx(rx));
+  const MVP=M4.mul(Pm, M4.mul(M4.t(-dist), M));
+
+  gl.uniformMatrix4fv(uM,false,M);
+  gl.uniformMatrix4fv(uMVP,false,MVP);
+
+  gl.drawElements(gl.TRIANGLES, mesh.I.length, gl.UNSIGNED_SHORT, 0);
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>
