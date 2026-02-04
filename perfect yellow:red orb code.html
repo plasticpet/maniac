@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Ultra Saturated Red Orb + Yellow Spotlight (Playful)</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{width:100%;height:100%;display:block;cursor:grab}
+  canvas:active{cursor:grabbing}
+  .hint{
+    position:fixed;left:12px;bottom:12px;
+    color:rgba(255,255,255,.65);
+    font:12px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    user-select:none;pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hint">drag = throw spin · click = pulse · scroll = zoom · shift+drag = slow precision</div>
+
+<script>
+(()=>{
+const c=document.getElementById('c');
+const gl=c.getContext('webgl',{alpha:true,antialias:true});
+if(!gl) return;
+gl.getExtension('OES_standard_derivatives');
+
+// ---------- Mat4 (column-major) ----------
+const M4={
+ I(){const m=new Float32Array(16);m[0]=m[5]=m[10]=m[15]=1;return m;},
+ mul(a,b){const o=new Float32Array(16);
+   for(let C=0;C<4;C++)for(let R=0;R<4;R++)
+     o[C*4+R]=a[R]*b[C*4]+a[4+R]*b[C*4+1]+a[8+R]*b[C*4+2]+a[12+R]*b[C*4+3];
+   return o;
+ },
+ persp(f,a,n,fa){const t=1/Math.tan(f/2),nf=1/(n-fa);
+   const m=new Float32Array(16);
+   m[0]=t/a;m[5]=t;m[10]=(fa+n)*nf;m[11]=-1;m[14]=2*fa*n*nf;
+   return m;
+ },
+ t(z){const m=M4.I();m[14]=z;return m;},
+ rx(a){const c=Math.cos(a),s=Math.sin(a),m=M4.I();m[5]=c;m[6]=s;m[9]=-s;m[10]=c;return m;},
+ ry(a){const c=Math.cos(a),s=Math.sin(a),m=M4.I();m[0]=c;m[2]=-s;m[8]=s;m[10]=c;return m;}
+};
+
+// ---------- Shaders ----------
+const VS=`
+attribute vec3 p,n;
+attribute vec2 u;
+uniform mat4 mvp,m;
+varying vec3 N;
+varying vec2 U;
+void main(){
+  N=normalize((m*vec4(n,0.)).xyz);
+  U=u;
+  gl_Position=mvp*vec4(p,1.);
+}`;
+
+const FS=`
+precision mediump float;
+varying vec3 N;
+varying vec2 U;
+uniform vec3 uLight;   // normalized light direction
+uniform float uPulse;  // 0..1 click pulse
+#extension GL_OES_standard_derivatives : enable
+
+float hash(vec2 p){return fract(sin(dot(p,vec2(37.1,91.7)))*43758.5453);}
+float noise(vec2 p){
+  vec2 i=floor(p),f=fract(p);
+  float a=hash(i),b=hash(i+vec2(1,0)),c=hash(i+vec2(0,1)),d=hash(i+1.);
+  vec2 u=f*f*(3.-2.*f);
+  return mix(a,b,u.x)+(c-a)*u.y*(1.-u.x)+(d-b)*u.x*u.y;
+}
+float aastep(float t,float v){float fw=fwidth(v);return smoothstep(t-fw,t+fw,v);}
+
+float scratches(vec2 uv){
+  vec2 p=(uv-.5)*vec2(28.,18.);
+  p.x+=sin(p.y*0.85)*0.9;
+  float l=abs(fract(p.x+noise(p*0.35))-0.5);
+  float s1=1.0-aastep(0.486,l);
+
+  vec2 q=p*1.7;
+  q.x+=sin(q.y*1.4)*0.4;
+  float l2=abs(fract(q.x+noise(q*0.6))-0.5);
+  float s2=1.0-aastep(0.493,l2);
+
+  // occasional faint scuffs (variety without noise)
+  vec2 r=p*0.55 + vec2(7.3, 2.1);
+  float sc = smoothstep(0.74, 0.95, noise(r*0.35));
+  return clamp(s1*0.7+s2*0.45 + sc*0.12,0.0,1.0);
+}
+
+// very tiny vignette to keep it "product clean" (not grey)
+float vignette(vec2 uv){
+  vec2 p = uv*2.0-1.0;
+  float v = 1.0 - dot(p,p)*0.12;
+  return clamp(v, 0.75, 1.0);
+}
+
+void main(){
+  vec3 V=vec3(0,0,1);
+
+  // LOCKED colors (body stays red; light stays yellow)
+  vec3 baseRed    = vec3(1.20,0.01,0.02); // even punchier than last
+  vec3 spotYellow = vec3(1.75,1.60,0.10);
+
+  vec3 L = normalize(uLight);
+
+  float h=scratches(U);
+  vec3 n2=normalize(N+vec3(h,-h,h)*0.18);
+
+  float lam=max(dot(n2,L),0.0);
+  vec3 H=normalize(L+V);
+  float spec=pow(max(dot(n2,H),0.0), 190.0);
+
+  // click pulse = brief "energy" pop in the hotspot only (still yellow)
+  float pulse = uPulse;
+  float lam2 = lam*lam;
+  float hot = smoothstep(0.20, 0.98, lam2 + spec*1.25);
+  float pulseBoost = (0.55*pulse) * hot;
+
+  vec3 col = baseRed * (0.28 + 0.72*lam);
+  col += spotYellow * (lam2*1.20 + spec*1.70 + pulseBoost);
+
+  // micro grain
+  float grain=(noise(U*420.0)-0.5)*0.03;
+  col*=1.0+grain;
+
+  // gamma
+  col = pow(col, vec3(1.0/1.62));
+
+  // slight plastic translucency (kept subtle)
+  float fres=pow(1.0-max(dot(n2,V),0.0),2.2);
+  float alpha=0.92+0.06*fres;
+
+  col *= vignette(U);
+
+  gl_FragColor=vec4(col,alpha);
+}`;
+
+// compile/link
+function sh(t,s){const r=gl.createShader(t);gl.shaderSource(r,s);gl.compileShader(r);return r;}
+const P=gl.createProgram();
+gl.attachShader(P,sh(gl.VERTEX_SHADER,VS));
+gl.attachShader(P,sh(gl.FRAGMENT_SHADER,FS));
+gl.linkProgram(P);
+gl.useProgram(P);
+
+gl.enable(gl.DEPTH_TEST);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+
+// mesh
+function sphere(n=240){
+  const P=[],N=[],U=[],I=[];
+  for(let y=0;y<=n;y++)for(let x=0;x<=n;x++){
+    const u=x/n,v=y/n,th=v*Math.PI,ph=u*2*Math.PI;
+    const sx=Math.sin(th)*Math.cos(ph),sy=Math.cos(th),sz=Math.sin(th)*Math.sin(ph);
+    P.push(sx,sy,sz);N.push(sx,sy,sz);U.push(u,1-v);
+  }
+  for(let y=0;y<n;y++)for(let x=0;x<n;x++){
+    const i=y*(n+1)+x;
+    I.push(i,i+n+1,i+1,i+n+1,i+n+2,i+1);
+  }
+  return {P:new Float32Array(P),N:new Float32Array(N),U:new Float32Array(U),I:new Uint16Array(I)};
+}
+const m=sphere();
+
+function buf(a,d,s){
+  const l=gl.getAttribLocation(P,a);
+  const b=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,b);
+  gl.bufferData(gl.ARRAY_BUFFER,d,gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(l);
+  gl.vertexAttribPointer(l,s,gl.FLOAT,false,0,0);
+}
+buf('p',m.P,3);buf('n',m.N,3);buf('u',m.U,2);
+const ib=gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,m.I,gl.STATIC_DRAW);
+
+// uniforms
+const uLightLoc = gl.getUniformLocation(P,'uLight');
+const uPulseLoc = gl.getUniformLocation(P,'uPulse');
+
+// ----- Interaction: "throw" physics + cursor spotlight -----
+// angles
+let rx=0.20, ry=0.60;
+// angular velocity (radians/frame-ish, scaled by dt)
+let vrx=0, vry=0;
+// zoom
+let dist=2.75;
+// drag state
+let md=false, lx=0, ly=0, slow=false;
+
+// spotlight target follows cursor (fun)
+let lightTarget=[0.55,0.95,1.15];
+let lightNow=[0.55,0.95,1.15];
+
+// click pulse
+let pulse=0.0;
+function triggerPulse(){
+  pulse = 1.0;
+  // add a little spin impulse in the direction of last movement (or a default)
+  vry += (Math.random()*0.002 + 0.002) * (Math.random()<0.5?-1:1);
+  vrx += (Math.random()*0.0015 + 0.001) * (Math.random()<0.5?-1:1);
+}
+
+c.addEventListener('mousedown', e=>{
+  md=true; lx=e.clientX; ly=e.clientY;
+  slow = !!e.shiftKey;
+  // keep current velocity so you can "catch" and redirect, feels fun
+});
+
+window.addEventListener('mouseup', ()=>{ md=false; slow=false; });
+window.addEventListener('keydown', e=>{ if(e.key==='Shift') slow=true; });
+window.addEventListener('keyup', e=>{ if(e.key==='Shift') slow=false; });
+
+window.addEventListener('mousemove', e=>{
+  // cursor-driven spotlight (subtle): maps cursor to light X/Y
+  const nx = (e.clientX / innerWidth) * 2 - 1;
+  const ny = (e.clientY / innerHeight) * 2 - 1;
+  // keep Z forward to preserve "spotlight on top"
+  lightTarget = [0.55 + nx*0.35, 0.95 + (-ny)*0.35, 1.15];
+
+  if(!md) return;
+  const dx=e.clientX-lx, dy=e.clientY-ly;
+  lx=e.clientX; ly=e.clientY;
+
+  const k = slow ? 0.0022 : 0.0050;
+  ry += dx*k;
+  rx += dy*k;
+
+  const vk = slow ? 0.00055 : 0.00125;
+  vry = dx*vk;
+  vrx = dy*vk;
+
+  rx = Math.max(-1.25, Math.min(1.25, rx));
+});
+
+c.addEventListener('click', (e)=>{
+  // ignore click that ends a drag (small threshold)
+  triggerPulse();
+});
+
+c.addEventListener('wheel', e=>{
+  e.preventDefault();
+  dist *= (e.deltaY>0)?1.10:0.90;
+  dist = Math.max(1.55, Math.min(8.0, dist));
+},{passive:false});
+
+function resize(){
+  const r=Math.min(devicePixelRatio||1,2);
+  c.width=innerWidth*r; c.height=innerHeight*r;
+  gl.viewport(0,0,c.width,c.height);
+}
+addEventListener('resize',resize); resize();
+
+const uM = gl.getUniformLocation(P,'m');
+const uMVP = gl.getUniformLocation(P,'mvp');
+
+let lastT=performance.now();
+function norm3(v){
+  const l=Math.hypot(v[0],v[1],v[2])||1;
+  return [v[0]/l,v[1]/l,v[2]/l];
+}
+
+function draw(t){
+  const dt=Math.min(0.033,(t-lastT)/1000); lastT=t;
+  const dt60 = dt*60.0;
+
+  // inertia glide: slightly "floaty", longer tail
+  if(!md){
+    ry += vry * dt60;
+    rx += vrx * dt60;
+    const damp = Math.pow(0.94, dt60);   // longer glide than before
+    vry *= damp;
+    vrx *= damp;
+    // micro idle spin so it never feels dead
+    if(Math.abs(vry)+Math.abs(vrx) < 0.00012){
+      vry += 0.00018;
+      vrx += 0.00006;
+    }
+  }
+
+  // smooth spotlight follow (feels premium)
+  const follow = 1.0 - Math.pow(0.12, dt60); // fast but smooth
+  lightNow[0] += (lightTarget[0]-lightNow[0])*follow;
+  lightNow[1] += (lightTarget[1]-lightNow[1])*follow;
+  lightNow[2] += (lightTarget[2]-lightNow[2])*follow;
+  const L = norm3(lightNow);
+  gl.uniform3f(uLightLoc, L[0], L[1], L[2]);
+
+  // pulse decay
+  pulse *= Math.pow(0.82, dt60);
+  gl.uniform1f(uPulseLoc, pulse);
+
+  gl.clearColor(0,0,0,0);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+
+  const Pm=M4.persp(Math.PI/4, c.width/c.height, 0.1, 100.0);
+  const M=M4.mul(M4.ry(ry), M4.rx(rx));
+  const MVP=M4.mul(Pm, M4.mul(M4.t(-dist), M));
+
+  gl.uniformMatrix4fv(uM,false,M);
+  gl.uniformMatrix4fv(uMVP,false,MVP);
+
+  gl.drawElements(gl.TRIANGLES, m.I.length, gl.UNSIGNED_SHORT, 0);
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>
